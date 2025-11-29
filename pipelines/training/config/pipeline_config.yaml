@@ -1,0 +1,227 @@
+# =============================================================================
+# Training Pipeline Configuration
+# =============================================================================
+# This file contains all configurable parameters for the training pipeline.
+# Separating config from code allows:
+#   - Different configs for dev/staging/prod environments
+#   - Easy parameter tuning without code changes
+#   - GitOps-friendly configuration management
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Pipeline Metadata
+# -----------------------------------------------------------------------------
+pipeline:
+  name: "model-training-pipeline"
+  description: "End-to-end ML training pipeline with validation and registration"
+  version: "1.0.0"
+
+# -----------------------------------------------------------------------------
+# Data Configuration
+# -----------------------------------------------------------------------------
+data:
+  # DVC settings
+  dvc:
+    remote: "s3://mlops-data-bucket/dvc-store"
+    default_version: "v1.0.0"  # Default data version if not specified
+  
+  # Feast feature store settings
+  feast:
+    repo_path: "/feast"
+    feature_service: "default_features"
+    # Point-in-time join settings
+    entity_column: "entity_id"
+    timestamp_column: "event_timestamp"
+  
+  # S3 settings
+  s3:
+    bucket: "mlops-data-bucket"
+    training_data_prefix: "training-data/"
+    artifacts_prefix: "artifacts/"
+
+# -----------------------------------------------------------------------------
+# Data Validation Configuration
+# -----------------------------------------------------------------------------
+validation:
+  # Great Expectations settings
+  min_row_count: 100
+  max_null_percentage: 5.0
+  
+  # Schema expectations
+  required_columns:
+    - "target"
+    - "entity_id"
+  
+  # Column type expectations
+  column_types:
+    target: "int64"
+    entity_id: "string"
+  
+  # Value range checks (column_name: [min, max])
+  value_ranges:
+    target: [0, 1]
+  
+  # Distribution checks
+  # reference_dataset: "s3://mlops-data-bucket/reference/baseline.parquet"
+
+# -----------------------------------------------------------------------------
+# Model Training Configuration
+# -----------------------------------------------------------------------------
+training:
+  # Default model type
+  model_type: "xgboost"
+  
+  # Hyperparameters per model type
+  hyperparameters:
+    xgboost:
+      max_depth: 6
+      learning_rate: 0.1
+      n_estimators: 100
+      subsample: 0.8
+      colsample_bytree: 0.8
+      random_state: 42
+    
+    sklearn_rf:
+      n_estimators: 100
+      max_depth: 10
+      min_samples_split: 2
+      random_state: 42
+  
+  # Train/validation split
+  validation_split: 0.2
+  stratify: true
+  
+  # Resource requirements (for Kubeflow)
+  resources:
+    cpu: "4"
+    memory: "8Gi"
+    gpu: "1"  # Set to "0" for CPU-only training
+    gpu_type: "nvidia.com/gpu"
+
+# -----------------------------------------------------------------------------
+# MLflow Configuration
+# -----------------------------------------------------------------------------
+mlflow:
+  # Tracking server
+  tracking_uri: "http://mlflow.mlops.svc.cluster.local:5000"
+  
+  # Experiment organization
+  experiment_name: "training-pipeline"
+  
+  # Model registry
+  model_name: "classifier-model"
+  
+  # Artifact storage
+  artifact_location: "s3://mlops-data-bucket/mlflow-artifacts/"
+
+# -----------------------------------------------------------------------------
+# Model Evaluation Configuration
+# -----------------------------------------------------------------------------
+evaluation:
+  # Primary metric for comparison
+  primary_metric: "f1_score"
+  
+  # Secondary metrics to track (not used for promotion decision)
+  secondary_metrics:
+    - "accuracy"
+    - "roc_auc"
+    - "precision"
+    - "recall"
+  
+  # Promotion thresholds
+  min_improvement_threshold: 0.01  # 1% improvement required
+  acceptable_degradation: 0.005     # 0.5% degradation acceptable for "review"
+  
+  # Minimum absolute thresholds (model must meet these regardless of comparison)
+  minimum_thresholds:
+    f1_score: 0.6
+    accuracy: 0.7
+
+# -----------------------------------------------------------------------------
+# Model Registration Configuration
+# -----------------------------------------------------------------------------
+registration:
+  # Auto-registration settings
+  auto_register: true
+  initial_stage: "Staging"  # Models register to Staging, not Production
+  
+  # Tags to add to registered models
+  default_tags:
+    team: "ml-platform"
+    project: "classifier"
+  
+  # Promotion rules
+  promotion:
+    staging_to_production: "manual"  # or "automatic"
+    require_approval: true
+    approvers:
+      - "ml-lead"
+      - "data-science-manager"
+
+# -----------------------------------------------------------------------------
+# Alerting Configuration
+# -----------------------------------------------------------------------------
+alerting:
+  # Datadog integration
+  datadog:
+    enabled: true
+    api_key_secret: "datadog-api-key"  # K8s secret name
+    
+    # Alert conditions
+    alerts:
+      pipeline_failure:
+        severity: "high"
+        notify: ["ml-team@company.com"]
+      
+      validation_failure:
+        severity: "medium"
+        notify: ["data-team@company.com", "ml-team@company.com"]
+      
+      model_degradation:
+        severity: "high"
+        notify: ["ml-team@company.com", "on-call@company.com"]
+
+# -----------------------------------------------------------------------------
+# Scheduled Training (Kubeflow RecurringRun)
+# -----------------------------------------------------------------------------
+scheduling:
+  enabled: true
+  cron: "0 2 * * 0"  # Every Sunday at 2 AM
+  
+  # Default parameters for scheduled runs
+  default_params:
+    trigger_type: "scheduled"
+    data_version: "latest"  # Use latest DVC tag
+  
+  # Cooldown after drift-triggered runs (hours)
+  cooldown_hours: 24
+
+# -----------------------------------------------------------------------------
+# Environment-Specific Overrides
+# -----------------------------------------------------------------------------
+environments:
+  development:
+    mlflow:
+      tracking_uri: "http://localhost:5000"
+    training:
+      resources:
+        gpu: "0"  # No GPU in dev
+    validation:
+      min_row_count: 10  # Lower threshold for testing
+  
+  staging:
+    mlflow:
+      tracking_uri: "http://mlflow.mlops-staging.svc.cluster.local:5000"
+    training:
+      resources:
+        gpu: "1"
+  
+  production:
+    mlflow:
+      tracking_uri: "http://mlflow.mlops.svc.cluster.local:5000"
+    training:
+      resources:
+        gpu: "1"
+    registration:
+      promotion:
+        require_approval: true
